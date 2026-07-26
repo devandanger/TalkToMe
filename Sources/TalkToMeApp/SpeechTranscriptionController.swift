@@ -26,6 +26,7 @@ final class SpeechTranscriptionController {
     var isPreparing = false
     var audioInputDevices: [AudioInputDevice] = []
     var selectedAudioInputID: String?
+    @ObservationIgnored var onTranscriptFinalized: ((String) -> Void)?
 
     private let audioEngine = AVAudioEngine()
 
@@ -33,13 +34,20 @@ final class SpeechTranscriptionController {
     @available(iOS 26.0, macOS 26.0, *)
     private var transcriber: SpeechTranscriber?
     @available(iOS 26.0, macOS 26.0, *)
+    private var speechDetector: SpeechDetector?
+    @available(iOS 26.0, macOS 26.0, *)
     private var analyzer: SpeechAnalyzer?
     @available(iOS 26.0, macOS 26.0, *)
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var audioConverter: AVAudioConverter?
     private var analyzerAudioFormat: AVAudioFormat?
     private var resultsTask: Task<Void, Never>?
+    private var detectorTask: Task<Void, Never>?
+    private var endOfSpeechTask: Task<Void, Never>?
     private var analysisTask: Task<Void, Never>?
+    private var didDetectSpeech = false
+    private var currentTurnTranscript = ""
+    private let endOfSpeechDelayNanoseconds: UInt64 = 1_500_000_000
     #endif
 
     func prepare() async {
@@ -123,18 +131,26 @@ final class SpeechTranscriptionController {
             guard let locale = currentLocale ?? fallbackLocale else {
                 throw TalkToMeError.speechLocaleUnavailable(Locale.current.identifier)
             }
-            let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+            let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+            let detector = SpeechDetector(
+                detectionOptions: .init(sensitivityLevel: .high),
+                reportResults: true
+            )
             self.transcriber = transcriber
+            self.speechDetector = detector
+            didDetectSpeech = false
+            currentTurnTranscript = ""
 
-            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            let modules: [any SpeechModule] = [detector, transcriber]
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
                 status = "Installing speech model..."
                 try await request.downloadAndInstall()
             }
 
-            let analyzer = SpeechAnalyzer(modules: [transcriber])
+            let analyzer = SpeechAnalyzer(modules: modules)
             self.analyzer = analyzer
             let inputFormat = audioEngine.inputNode.outputFormat(forBus: 0)
-            let analyzerFormat = await Self.analyzerFormat(for: transcriber, inputFormat: inputFormat)
+            let analyzerFormat = await Self.analyzerFormat(for: modules, inputFormat: inputFormat)
             analyzerAudioFormat = analyzerFormat
             audioConverter = Self.formatsMatch(inputFormat, analyzerFormat) ? nil : AVAudioConverter(from: inputFormat, to: analyzerFormat)
             status = "Preparing speech analysis..."
@@ -148,14 +164,35 @@ final class SpeechTranscriptionController {
                     for try await result in transcriber.results {
                         let text = String(result.text.characters)
                         await MainActor.run {
-                            self?.transcript = text
-                            self?.status = "Listening..."
+                            self?.currentTurnTranscript = text
+                            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                self?.didDetectSpeech = true
+                                self?.status = "Speech detected..."
+                                self?.diagnostics = "Transcript activity detected; waiting for end of speech."
+                                self?.scheduleEndOfSpeechTimeout()
+                            } else {
+                                self?.status = "Listening for speech..."
+                            }
                         }
                     }
                 } catch {
                     await MainActor.run {
                         self?.status = "Transcription failed"
                         self?.diagnostics = error.localizedDescription
+                    }
+                }
+            }
+
+            detectorTask = Task { [weak self] in
+                do {
+                    for try await result in detector.results {
+                        await MainActor.run {
+                            self?.handleSpeechDetectionResult(result)
+                        }
+                    }
+                } catch {
+                    await MainActor.run {
+                        self?.diagnostics = "SpeechDetector failed: \(error.localizedDescription)"
                     }
                 }
             }
@@ -180,11 +217,11 @@ final class SpeechTranscriptionController {
             try startAudioEngine(inputFormat: inputFormat)
             isRecording = true
             status = "Recording speech..."
-            diagnostics = "SpeechAnalyzer active with \(selectedAudioInputName), \(locale.identifier), \(Self.describe(analyzerFormat))."
+            diagnostics = "SpeechAnalyzer + SpeechDetector active with \(selectedAudioInputName), \(locale.identifier), \(Self.describe(analyzerFormat))."
         } catch {
             status = "Could not start"
             diagnostics = error.localizedDescription
-            await cleanUpRecordingSession()
+            await cleanUpRecordingSession(cancelDetectorTask: true)
         }
         #else
         status = "Unsupported SDK"
@@ -200,12 +237,24 @@ final class SpeechTranscriptionController {
         guard isRecording || isPreparing else { return }
         status = "Finalizing..."
 
-        await cleanUpRecordingSession()
+        await cleanUpRecordingSession(cancelDetectorTask: true)
 
         status = "Idle"
     }
 
-    private func cleanUpRecordingSession() async {
+    private func autoStopAfterSpeechEnded() async {
+        guard isRecording else { return }
+        status = "Speech ended. Finalizing transcript..."
+        await cleanUpRecordingSession(cancelDetectorTask: false)
+        let finalizedTranscript = currentTurnTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcript = finalizedTranscript
+        status = finalizedTranscript.isEmpty ? "No transcript captured" : "Transcript ready"
+        if !finalizedTranscript.isEmpty {
+            onTranscriptFinalized?(finalizedTranscript)
+        }
+    }
+
+    private func cleanUpRecordingSession(cancelDetectorTask: Bool) async {
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         isRecording = false
@@ -216,15 +265,54 @@ final class SpeechTranscriptionController {
             inputContinuation = nil
             await analysisTask?.value
             resultsTask?.cancel()
+            endOfSpeechTask?.cancel()
+            if cancelDetectorTask {
+                detectorTask?.cancel()
+            }
             resultsTask = nil
+            detectorTask = nil
+            endOfSpeechTask = nil
             analysisTask = nil
             analyzer = nil
+            speechDetector = nil
             transcriber = nil
             audioConverter = nil
             analyzerAudioFormat = nil
+            didDetectSpeech = false
         }
         #endif
     }
+
+    #if canImport(Speech)
+    @available(iOS 26.0, macOS 26.0, *)
+    private func handleSpeechDetectionResult(_ result: SpeechDetector.Result) {
+        if result.speechDetected {
+            didDetectSpeech = true
+            status = "Speech detected..."
+            diagnostics = "SpeechDetector reports active speech."
+            endOfSpeechTask?.cancel()
+            return
+        }
+
+        guard didDetectSpeech, isRecording else { return }
+        status = "Speech pause detected..."
+        diagnostics = "SpeechDetector reports a pause; finalizing if speech does not resume."
+        scheduleEndOfSpeechTimeout()
+    }
+
+    private func scheduleEndOfSpeechTimeout() {
+        guard isRecording, didDetectSpeech else { return }
+        endOfSpeechTask?.cancel()
+        endOfSpeechTask = Task { [weak self, endOfSpeechDelayNanoseconds] in
+            do {
+                try await Task.sleep(nanoseconds: endOfSpeechDelayNanoseconds)
+                await self?.autoStopAfterSpeechEnded()
+            } catch {
+                // Superseded by newer detector or transcript activity.
+            }
+        }
+    }
+    #endif
 
     #if canImport(Speech)
     @available(iOS 26.0, macOS 26.0, *)
@@ -315,9 +403,9 @@ final class SpeechTranscriptionController {
     #endif
 
     @available(iOS 26.0, macOS 26.0, *)
-    private static func analyzerFormat(for transcriber: SpeechTranscriber, inputFormat: AVAudioFormat) async -> AVAudioFormat {
+    private static func analyzerFormat(for modules: [any SpeechModule], inputFormat: AVAudioFormat) async -> AVAudioFormat {
         let suggestedFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
-            compatibleWith: [transcriber],
+            compatibleWith: modules,
             considering: inputFormat
         ) ?? inputFormat
 

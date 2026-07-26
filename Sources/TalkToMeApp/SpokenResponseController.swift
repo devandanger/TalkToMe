@@ -8,6 +8,7 @@ final class SpokenResponseController: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     var isSpeaking = false
     var diagnostics = "System speech synthesis ready."
+    @ObservationIgnored var onFinishedSpeaking: (() -> Void)?
 
     override init() {
         super.init()
@@ -37,7 +38,10 @@ final class SpokenResponseController: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in isSpeaking = false }
+        Task { @MainActor in
+            isSpeaking = false
+            onFinishedSpeaking?()
+        }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {

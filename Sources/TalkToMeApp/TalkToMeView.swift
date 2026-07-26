@@ -5,6 +5,7 @@ struct TalkToMeView: View {
     @State private var intelligence = AppleIntelligenceController()
     @State private var speaker = SpokenResponseController()
     @State private var prompt = "Use my transcript as a quick daily check-in. Be concise, practical, and warm. Identify what seems important, suggest one next action, and ask one useful follow-up question."
+    @State private var conversationActive = false
 
     var body: some View {
         NavigationStack {
@@ -19,9 +20,9 @@ struct TalkToMeView: View {
             .toolbar {
                 ToolbarItemGroup {
                     Button {
-                        Task { await toggleRecording() }
+                        Task { await toggleConversation() }
                     } label: {
-                        Label(speech.isRecording ? "Stop" : "Record", systemImage: speech.isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                        Label(conversationActive ? "Stop" : "Record", systemImage: conversationActive ? "stop.circle.fill" : "mic.circle.fill")
                     }
                     .disabled(speech.isPreparing)
 
@@ -35,6 +36,13 @@ struct TalkToMeView: View {
             }
             .task {
                 intelligence.refreshDiagnostics()
+                speech.onTranscriptFinalized = { transcript in
+                    Task { await respondAndSpeak(to: transcript, continueListening: true) }
+                }
+                speaker.onFinishedSpeaking = {
+                    guard conversationActive else { return }
+                    Task { await speech.startRecording() }
+                }
                 await speech.prepare()
             }
         }
@@ -154,17 +162,28 @@ struct TalkToMeView: View {
         .padding(.top, 8)
     }
 
-    private func toggleRecording() async {
-        if speech.isRecording {
+    private func toggleConversation() async {
+        if conversationActive {
+            conversationActive = false
             await speech.stopRecording()
+            speaker.stop()
         } else {
+            conversationActive = true
             await speech.startRecording()
         }
     }
 
     private func askAppleIntelligence() async {
+        conversationActive = false
         await speech.stopRecording()
-        await intelligence.respond(to: speech.transcript, instructions: prompt)
+        await respondAndSpeak(to: speech.transcript, continueListening: false)
+    }
+
+    private func respondAndSpeak(to transcript: String, continueListening: Bool) async {
+        await intelligence.respond(to: transcript, instructions: prompt)
+        if continueListening, !conversationActive {
+            return
+        }
         speaker.speak(intelligence.response)
     }
 
@@ -173,7 +192,7 @@ struct TalkToMeView: View {
             return "Preparing the microphone..."
         }
         if speech.isRecording {
-            return "Recording speech. Start talking and your transcript will appear here."
+            return "Listening. Your words will appear here after you finish speaking."
         }
         return "Tap Record and say what happened today."
     }
