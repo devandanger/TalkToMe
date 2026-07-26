@@ -4,7 +4,8 @@ struct TalkToMeView: View {
     @State private var speech = SpeechTranscriptionController()
     @State private var intelligence = AppleIntelligenceController()
     @State private var speaker = SpokenResponseController()
-    @State private var prompt = "Use my transcript as a quick daily check-in. Be concise, practical, and warm. Identify what seems important, suggest one next action, and ask one useful follow-up question."
+    @State private var conversationHistory: [ConversationMessage] = []
+    @State private var prompt = "You are TalkToMe, a concise conversational assistant. Use the conversation history for continuity, answer the current user message naturally, and ask at most one useful follow-up question when it helps."
     @State private var conversationActive = false
 
     var body: some View {
@@ -79,20 +80,70 @@ struct TalkToMeView: View {
                 .disabled(speech.isRecording || speech.isPreparing)
             }
 
-            TextEditor(text: $speech.transcript)
-                .font(.body)
-                .frame(minHeight: 170)
-                .overlay {
-                    if speech.transcript.isEmpty {
-                        Text(transcriptPlaceholder)
-                            .foregroundStyle(.secondary)
-                            .allowsHitTesting(false)
+            HStack(alignment: .top, spacing: 12) {
+                TextEditor(text: $speech.transcript)
+                    .font(.body)
+                    .frame(minHeight: 170)
+                    .overlay {
+                        if speech.transcript.isEmpty {
+                            Text(transcriptPlaceholder)
+                                .foregroundStyle(.secondary)
+                                .allowsHitTesting(false)
+                        }
                     }
-                }
+
+                conversationHistoryPanel
+            }
 
             TextField("Prompt", text: $prompt, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
         }
+    }
+
+    private var conversationHistoryPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("History", systemImage: "text.bubble")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                Button {
+                    conversationHistory.removeAll()
+                    speech.transcript = ""
+                    intelligence.response = ""
+                } label: {
+                    Label("Clear", systemImage: "trash")
+                }
+                .labelStyle(.iconOnly)
+                .disabled(conversationHistory.isEmpty)
+            }
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if conversationHistory.isEmpty {
+                        Text("Conversation turns will appear here.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(conversationHistory) { message in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(message.role.rawValue)
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(message.role == .user ? .blue : .green)
+                                Text(message.text)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 240)
+        .frame(minHeight: 170)
     }
 
     private var responsePanel: some View {
@@ -180,9 +231,17 @@ struct TalkToMeView: View {
     }
 
     private func respondAndSpeak(to transcript: String, continueListening: Bool) async {
-        await intelligence.respond(to: transcript, instructions: prompt)
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return }
+
+        let historyForPrompt = conversationHistory
+        conversationHistory.append(.init(role: .user, text: trimmedTranscript))
+        await intelligence.respond(to: trimmedTranscript, history: historyForPrompt, instructions: prompt)
         if continueListening, !conversationActive {
             return
+        }
+        if !intelligence.response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            conversationHistory.append(.init(role: .assistant, text: intelligence.response))
         }
         speaker.speak(intelligence.response)
     }

@@ -25,7 +25,7 @@ final class AppleIntelligenceController {
         #endif
     }
 
-    func respond(to transcript: String, instructions: String) async {
+    func respond(to transcript: String, history: [ConversationMessage], instructions: String) async {
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTranscript.isEmpty else { return }
 
@@ -49,7 +49,7 @@ final class AppleIntelligenceController {
                     model: model,
                     instructions: Instructions(instructions)
                 )
-                let result = try await session.respond(to: Prompt(trimmedTranscript))
+                let result = try await session.respond(to: Prompt(Self.promptText(for: trimmedTranscript, history: history)))
                 response = result.content
             } catch {
                 response = "Foundation Models request failed: \(error.localizedDescription)"
@@ -60,6 +60,27 @@ final class AppleIntelligenceController {
         #else
         response = "Build with Xcode 26 or newer to enable the FoundationModels framework."
         #endif
+    }
+
+    private static func promptText(for transcript: String, history: [ConversationMessage]) -> String {
+        let priorConversation = history
+            .map { "\($0.role.rawValue): \($0.text)" }
+            .joined(separator: "\n")
+
+        if priorConversation.isEmpty {
+            return """
+            Current user message:
+            \(transcript)
+            """
+        }
+
+        return """
+        Conversation so far:
+        \(priorConversation)
+
+        Current user message:
+        \(transcript)
+        """
     }
 
     #if canImport(FoundationModels)
