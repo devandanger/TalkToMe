@@ -12,12 +12,14 @@ final class AppleIntelligenceController {
     var diagnostics = "Checking availability..."
     var isGenerating = false
     private(set) var lastPrompt = ""
+    @ObservationIgnored var diagnosticsCenter: AppDiagnosticsController?
 
     func refreshDiagnostics() {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, *) {
             let model = SystemLanguageModel.default
             diagnostics = Self.describe(model.availability, languages: model.supportedLanguages)
+            diagnosticsCenter?.log(diagnostics, source: "Foundation Models")
         } else {
             diagnostics = "Requires iOS 26.0 or macOS 26.0."
         }
@@ -26,7 +28,7 @@ final class AppleIntelligenceController {
         #endif
     }
 
-    func respond(to transcript: String, history: [ConversationMessage], instructions: String, responseLanguage: ResponseLanguage) async {
+    func respond(to transcript: String, history: [ConversationMessage], instructions: String, responseLanguage: ConversationLanguage) async {
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTranscript.isEmpty else { return }
         let promptText = Self.promptText(for: trimmedTranscript, history: history, responseLanguage: responseLanguage)
@@ -44,18 +46,22 @@ final class AppleIntelligenceController {
             let model = SystemLanguageModel.default
             guard model.isAvailable else {
                 response = "Apple Intelligence is not available on this device right now. Check the diagnostics below."
+                diagnosticsCenter?.log(response, level: .warning, source: "Foundation Models")
                 return
             }
 
             do {
+                diagnosticsCenter?.log("Sending prompt to Foundation Models.", source: "Foundation Models")
                 let session = LanguageModelSession(
                     model: model,
                     instructions: Instructions(instructions)
                 )
                 let result = try await session.respond(to: Prompt(promptText))
                 response = result.content
+                diagnosticsCenter?.log("Received Foundation Models response.", source: "Foundation Models")
             } catch {
                 response = "Foundation Models request failed: \(error.localizedDescription)"
+                diagnosticsCenter?.log(error, source: "Foundation Models")
             }
         } else {
             response = "This demo needs iOS 26.0 or macOS 26.0 for Foundation Models."
@@ -65,7 +71,7 @@ final class AppleIntelligenceController {
         #endif
     }
 
-    private static func promptText(for transcript: String, history: [ConversationMessage], responseLanguage: ResponseLanguage) -> String {
+    private static func promptText(for transcript: String, history: [ConversationMessage], responseLanguage: ConversationLanguage) -> String {
         let priorConversation = history
             .map { message in
                 switch message.role {

@@ -22,6 +22,7 @@ final class SpokenResponseController: NSObject, AVSpeechSynthesizerDelegate {
     var isSpeaking = false
     var diagnostics = "System speech synthesis ready."
     @ObservationIgnored var onFinishedSpeaking: (() -> Void)?
+    @ObservationIgnored var diagnosticsCenter: AppDiagnosticsController?
 
     override init() {
         super.init()
@@ -49,17 +50,27 @@ final class SpokenResponseController: NSObject, AVSpeechSynthesizerDelegate {
             }
         let premiumCount = voices.filter { $0.quality == .premium || $0.quality == .enhanced }.count
         diagnostics = "\(voices.count) voices installed; \(premiumCount) enhanced or premium voices."
+        diagnosticsCenter?.log(diagnostics, source: "Speech Output")
     }
 
     func preferLanguage(_ language: String) {
         if let exactVoice = AVSpeechSynthesisVoice.speechVoices().first(where: { $0.language == language }) {
             selectedVoiceIdentifier = exactVoice.identifier
+            diagnosticsCenter?.log("Selected voice \(exactVoice.name) for \(language).", source: "Speech Output")
             return
         }
 
         let languagePrefix = language.split(separator: "-").first.map(String.init) ?? language
         if let matchingVoice = AVSpeechSynthesisVoice.speechVoices().first(where: { $0.language.hasPrefix(languagePrefix) }) {
             selectedVoiceIdentifier = matchingVoice.identifier
+            diagnosticsCenter?.log("Selected voice \(matchingVoice.name) for \(matchingVoice.language).", source: "Speech Output")
+        }
+    }
+
+    func hasVoice(for language: String) -> Bool {
+        let languagePrefix = language.split(separator: "-").first.map(String.init) ?? language
+        return AVSpeechSynthesisVoice.speechVoices().contains {
+            $0.language == language || $0.language.hasPrefix(languagePrefix)
         }
     }
 
@@ -76,6 +87,7 @@ final class SpokenResponseController: NSObject, AVSpeechSynthesizerDelegate {
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         synthesizer.speak(utterance)
         isSpeaking = true
+        diagnosticsCenter?.log("Speaking response with \(utterance.voice?.name ?? "system voice").", source: "Speech Output")
     }
 
     func stop() {

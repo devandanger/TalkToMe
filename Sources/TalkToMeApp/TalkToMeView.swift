@@ -4,9 +4,10 @@ struct TalkToMeView: View {
     @State private var speech = SpeechTranscriptionController()
     @State private var intelligence = AppleIntelligenceController()
     @State private var speaker = SpokenResponseController()
+    @State private var appDiagnostics = AppDiagnosticsController()
     @State private var conversationHistory: [ConversationMessage] = []
     @State private var prompt = "You are a concise conversational assistant. Use the conversation history for continuity, answer the current user message naturally but with simple sentences, and ask at most one useful follow-up question when it helps. Reply with only the assistant message, without a name or role prefix."
-    @State private var responseLanguage: ResponseLanguage = .slovenian
+    @State private var responseLanguage: ConversationLanguage = .slovenian
     @State private var conversationActive = false
 
     var body: some View {
@@ -14,7 +15,7 @@ struct TalkToMeView: View {
             VStack(spacing: 16) {
                 transcriptPanel
                 responsePanel
-                diagnosticsPanel
+                appDiagnosticsPanel
             }
             .padding()
             .frame(minWidth: 560, minHeight: 620)
@@ -37,6 +38,9 @@ struct TalkToMeView: View {
                 }
             }
             .task {
+                speech.diagnosticsCenter = appDiagnostics
+                intelligence.diagnosticsCenter = appDiagnostics
+                speaker.diagnosticsCenter = appDiagnostics
                 intelligence.refreshDiagnostics()
                 speech.onTranscriptFinalized = { transcript in
                     Task { await respondAndSpeak(to: transcript, continueListening: true) }
@@ -45,7 +49,7 @@ struct TalkToMeView: View {
                     guard conversationActive else { return }
                     Task { await speech.startRecording() }
                 }
-                if let voiceLanguageCode = responseLanguage.voiceLanguageCode {
+                if let voiceLanguageCode = responseLanguage.localeIdentifier {
                     speaker.preferLanguage(voiceLanguageCode)
                 }
                 await speech.prepare()
@@ -84,6 +88,29 @@ struct TalkToMeView: View {
                 .disabled(speech.isRecording || speech.isPreparing)
             }
 
+            HStack {
+                Picker("Input Language", selection: $speech.inputLanguage) {
+                    ForEach(ConversationLanguage.allCases) { language in
+                        Text(language.label).tag(language)
+                    }
+                }
+                .disabled(speech.isRecording || speech.isPreparing)
+                .onChange(of: speech.inputLanguage) { _, _ in
+                    Task { await speech.prepare() }
+                }
+
+                Picker("Response", selection: $responseLanguage) {
+                    ForEach(ConversationLanguage.allCases) { language in
+                        Text(language.label).tag(language)
+                    }
+                }
+                .onChange(of: responseLanguage) { _, newValue in
+                    if let voiceLanguageCode = newValue.localeIdentifier {
+                        speaker.preferLanguage(voiceLanguageCode)
+                    }
+                }
+            }
+
             HStack(alignment: .top, spacing: 12) {
                 TextEditor(text: $speech.transcript)
                     .font(.body)
@@ -109,17 +136,6 @@ struct TalkToMeView: View {
     private var speechOutputControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Picker("Response", selection: $responseLanguage) {
-                    ForEach(ResponseLanguage.allCases) { language in
-                        Text(language.label).tag(language)
-                    }
-                }
-                .onChange(of: responseLanguage) { _, newValue in
-                    if let voiceLanguageCode = newValue.voiceLanguageCode {
-                        speaker.preferLanguage(voiceLanguageCode)
-                    }
-                }
-
                 Picker("Voice", selection: $speaker.selectedVoiceIdentifier) {
                     if speaker.availableVoices.isEmpty {
                         Text("System Voice").tag(String?.none)
@@ -237,7 +253,25 @@ struct TalkToMeView: View {
             GridRow {
                 Text("SpeechAnalyzer")
                     .fontWeight(.semibold)
-                Text(speech.diagnostics)
+                Text(speech.analyzerDiagnostics)
+                    .foregroundStyle(.secondary)
+            }
+            GridRow {
+                Text("SpeechTranscriber Supported Locales")
+                    .fontWeight(.semibold)
+                Text(speech.transcriberSupportedLocalesDiagnostics)
+                    .foregroundStyle(.secondary)
+            }
+            GridRow {
+                Text("SpeechTranscriber Available Locales")
+                    .fontWeight(.semibold)
+                Text(speech.transcriberAvailableLocalesDiagnostics)
+                    .foregroundStyle(.secondary)
+            }
+            GridRow {
+                Text("SpeechDetector")
+                    .fontWeight(.semibold)
+                Text(speech.detectorDiagnostics)
                     .foregroundStyle(.secondary)
             }
             GridRow {
@@ -246,25 +280,94 @@ struct TalkToMeView: View {
                 Text(speaker.diagnostics)
                     .foregroundStyle(.secondary)
             }
+            GridRow {
+                Text("Slovenian TTS")
+                    .fontWeight(.semibold)
+                Text(speaker.hasVoice(for: "sl-SI") ? "Installed" : "No sl-SI voice installed")
+                    .foregroundStyle(.secondary)
+            }
         }
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 8)
     }
 
+    private var appDiagnosticsPanel: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Current Diagnostics", systemImage: "gauge.with.dots.needle.67percent")
+                    .font(.headline)
+                diagnosticsPanel
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            eventLogPanel
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var eventLogPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Event Log", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    appDiagnostics.clear()
+                } label: {
+                    Label("Clear Diagnostics", systemImage: "trash")
+                }
+                .disabled(appDiagnostics.entries.isEmpty)
+            }
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    if appDiagnostics.entries.isEmpty {
+                        Text("No app diagnostics yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(appDiagnostics.entries.reversed()) { entry in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(entry.date, style: .time)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 72, alignment: .leading)
+                                Text(entry.level.rawValue)
+                                    .foregroundStyle(color(for: entry.level))
+                                    .frame(width: 58, alignment: .leading)
+                                Text(entry.source)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 130, alignment: .leading)
+                                Text(entry.message)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                }
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 140, maxHeight: 190)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     private func toggleConversation() async {
         if conversationActive {
             conversationActive = false
+            appDiagnostics.log("Conversation stopped by user.", source: "App")
             await speech.stopRecording()
             speaker.stop()
         } else {
             conversationActive = true
+            appDiagnostics.log("Conversation started by user.", source: "App")
             await speech.startRecording()
         }
     }
 
     private func askAppleIntelligence() async {
         conversationActive = false
+        appDiagnostics.log("Manual Ask invoked.", source: "App")
         await speech.stopRecording()
         await respondAndSpeak(to: speech.transcript, continueListening: false)
     }
@@ -275,6 +378,7 @@ struct TalkToMeView: View {
 
         let historyForPrompt = conversationHistory
         conversationHistory.append(.init(role: .user, text: trimmedTranscript))
+        appDiagnostics.log("Sending transcript to Apple Intelligence: \(trimmedTranscript)", source: "App")
         await intelligence.respond(
             to: trimmedTranscript,
             history: historyForPrompt,
@@ -311,6 +415,17 @@ struct TalkToMeView: View {
             return .green
         case .foundationRequest:
             return .orange
+        }
+    }
+
+    private func color(for level: AppDiagnosticEntry.Level) -> Color {
+        switch level {
+        case .info:
+            return .secondary
+        case .warning:
+            return .orange
+        case .error:
+            return .red
         }
     }
 }

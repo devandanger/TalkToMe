@@ -22,9 +22,19 @@ final class SpeechTranscriptionController {
     var transcript = ""
     var status = "Idle"
     var diagnostics = "Checking SpeechAnalyzer..."
+    var analyzerDiagnostics = "Checking SpeechAnalyzer..."
+    var transcriberSupportedLocalesDiagnostics = "Checking supported locales..."
+    var transcriberAvailableLocalesDiagnostics = "Checking installed locales..."
+    var detectorDiagnostics = "Checking SpeechDetector..."
     var isRecording = false
     var isPreparing = false
     var audioInputDevices: [AudioInputDevice] = []
+    var inputLanguage: ConversationLanguage = .slovenian {
+        didSet {
+            guard inputLanguage != oldValue else { return }
+            persistInputLanguage(inputLanguage)
+        }
+    }
     var selectedAudioInputID: String? {
         didSet {
             guard selectedAudioInputID != oldValue else { return }
@@ -32,12 +42,18 @@ final class SpeechTranscriptionController {
         }
     }
     @ObservationIgnored var onTranscriptFinalized: ((String) -> Void)?
+    @ObservationIgnored var diagnosticsCenter: AppDiagnosticsController?
 
     private let selectedAudioInputDefaultsKey = "selectedAudioInputID"
+    private let inputLanguageDefaultsKey = "inputLanguage"
     private let audioEngine = AVAudioEngine()
 
     init() {
         selectedAudioInputID = UserDefaults.standard.string(forKey: selectedAudioInputDefaultsKey)
+        if let rawInputLanguage = UserDefaults.standard.string(forKey: inputLanguageDefaultsKey),
+           let savedInputLanguage = ConversationLanguage(rawValue: rawInputLanguage) {
+            inputLanguage = savedInputLanguage
+        }
     }
 
     #if canImport(Speech)
@@ -66,15 +82,24 @@ final class SpeechTranscriptionController {
         #if canImport(Speech)
         guard #available(iOS 26.0, macOS 26.0, *) else {
             diagnostics = "Requires iOS 26.0 or macOS 26.0."
+            analyzerDiagnostics = diagnostics
+            transcriberSupportedLocalesDiagnostics = diagnostics
+            transcriberAvailableLocalesDiagnostics = diagnostics
+            detectorDiagnostics = diagnostics
             return
         }
 
-        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) else {
-            diagnostics = "No SpeechTranscriber locale for \(Locale.current.identifier)."
+        await refreshSpeechFrameworkDiagnostics()
+
+        let supportedLocales = await speechSupportedLocales()
+        guard let locale = await supportedSpeechLocale(for: inputLanguage, supportedLocales: supportedLocales) else {
+            diagnostics = "Speech input \(inputLanguage.label) is not supported. Available: \(Self.describe(supportedLocales))"
+            diagnosticsCenter?.log(diagnostics, level: .warning, source: "SpeechAnalyzer")
             return
         }
 
-        diagnostics = "SpeechTranscriber locale: \(locale.identifier)."
+        diagnostics = "Speech input \(inputLanguage.label): using \(locale.identifier). Available: \(Self.describe(supportedLocales))"
+        diagnosticsCenter?.log(diagnostics, source: "SpeechAnalyzer")
         #else
         diagnostics = "Speech framework is unavailable in this SDK."
         #endif
@@ -93,6 +118,7 @@ final class SpeechTranscriptionController {
             }
         } catch {
             diagnostics = "Could not list iOS audio inputs: \(error.localizedDescription)"
+            diagnosticsCenter?.log(error, source: "Audio Input")
         }
         #elseif os(macOS)
         let discoverySession = AVCaptureDevice.DiscoverySession(
@@ -119,6 +145,10 @@ final class SpeechTranscriptionController {
         }
     }
 
+    private func persistInputLanguage(_ language: ConversationLanguage) {
+        UserDefaults.standard.set(language.rawValue, forKey: inputLanguageDefaultsKey)
+    }
+
     func startRecording() async {
         guard !isRecording else { return }
         isPreparing = true
@@ -133,21 +163,20 @@ final class SpeechTranscriptionController {
 
         do {
             status = "Requesting permissions..."
+            diagnosticsCenter?.log("Requesting microphone and speech permissions.", source: "SpeechAnalyzer")
             try await requestPermissions()
             status = "Selecting microphone..."
             await refreshAudioInputs()
             try applySelectedAudioInput()
+            diagnosticsCenter?.log("Selected microphone: \(selectedAudioInputName).", source: "Audio Input")
 
             status = "Configuring SpeechAnalyzer..."
             guard SpeechTranscriber.isAvailable else {
                 throw TalkToMeError.speechTranscriberUnavailable
             }
-            let currentLocale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
-            let fallbackLocale = currentLocale == nil
-                ? await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US"))
-                : nil
-            guard let locale = currentLocale ?? fallbackLocale else {
-                throw TalkToMeError.speechLocaleUnavailable(Locale.current.identifier)
+            let supportedLocales = await speechSupportedLocales()
+            guard let locale = await supportedSpeechLocale(for: inputLanguage, supportedLocales: supportedLocales) else {
+                throw TalkToMeError.speechLocaleUnavailable(inputLanguage.label, Self.describe(supportedLocales))
             }
             let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
             let detector = SpeechDetector(
@@ -162,6 +191,7 @@ final class SpeechTranscriptionController {
             let modules: [any SpeechModule] = [detector, transcriber]
             if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
                 status = "Installing speech model..."
+                diagnosticsCenter?.log("Installing speech assets for input language \(inputLanguage.label).", source: "SpeechAnalyzer")
                 try await request.downloadAndInstall()
             }
 
@@ -197,6 +227,7 @@ final class SpeechTranscriptionController {
                     await MainActor.run {
                         self?.status = "Transcription failed"
                         self?.diagnostics = error.localizedDescription
+                        self?.diagnosticsCenter?.log(error, source: "SpeechTranscriber")
                     }
                 }
             }
@@ -211,6 +242,7 @@ final class SpeechTranscriptionController {
                 } catch {
                     await MainActor.run {
                         self?.diagnostics = "SpeechDetector failed: \(error.localizedDescription)"
+                        self?.diagnosticsCenter?.log(error, source: "SpeechDetector")
                     }
                 }
             }
@@ -227,6 +259,7 @@ final class SpeechTranscriptionController {
                     await MainActor.run {
                         self?.status = "Analysis failed"
                         self?.diagnostics = error.localizedDescription
+                        self?.diagnosticsCenter?.log(error, source: "SpeechAnalyzer")
                     }
                 }
             }
@@ -235,10 +268,12 @@ final class SpeechTranscriptionController {
             try startAudioEngine(inputFormat: inputFormat)
             isRecording = true
             status = "Recording speech..."
-            diagnostics = "SpeechAnalyzer + SpeechDetector active with \(selectedAudioInputName), \(locale.identifier), \(Self.describe(analyzerFormat))."
+            diagnostics = "SpeechAnalyzer + SpeechDetector active with \(selectedAudioInputName), input \(locale.identifier), \(Self.describe(analyzerFormat))."
+            diagnosticsCenter?.log(diagnostics, source: "SpeechAnalyzer")
         } catch {
             status = "Could not start"
             diagnostics = error.localizedDescription
+            diagnosticsCenter?.log(error, source: "SpeechAnalyzer")
             await cleanUpRecordingSession(cancelDetectorTask: true)
         }
         #else
@@ -250,6 +285,98 @@ final class SpeechTranscriptionController {
     private var selectedAudioInputName: String {
         audioInputDevices.first(where: { $0.id == selectedAudioInputID })?.name ?? "default input"
     }
+
+    #if canImport(Speech)
+    @available(iOS 26.0, macOS 26.0, *)
+    private func speechSupportedLocales() async -> [Locale] {
+        await SpeechTranscriber.supportedLocales
+    }
+
+    @available(iOS 26.0, macOS 26.0, *)
+    private func refreshSpeechFrameworkDiagnostics() async {
+        let supportedLocales = await SpeechTranscriber.supportedLocales
+        let installedLocales = await SpeechTranscriber.installedLocales
+        transcriberSupportedLocalesDiagnostics = Self.describe(supportedLocales)
+        transcriberAvailableLocalesDiagnostics = Self.describe(installedLocales)
+
+        let detector = SpeechDetector(
+            detectionOptions: .init(sensitivityLevel: .high),
+            reportResults: true
+        )
+        let detectorFormats = detector.availableCompatibleAudioFormats
+        let detectorStatus = await AssetInventory.status(forModules: [detector])
+        detectorDiagnostics = "Assets: \(Self.describe(detectorStatus)). Formats: \(Self.describe(detectorFormats))"
+
+        if let locale = await supportedSpeechLocale(for: inputLanguage, supportedLocales: supportedLocales) {
+            let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+            let modules: [any SpeechModule] = [detector, transcriber]
+            let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: modules)
+            let transcriberStatus = await AssetInventory.status(forModules: [transcriber])
+            analyzerDiagnostics = "Best format: \(analyzerFormat.map(Self.describe) ?? "none"). Modules: SpeechDetector, SpeechTranscriber(\(locale.identifier))."
+            transcriberAvailableLocalesDiagnostics += ". Selected assets: \(Self.describe(transcriberStatus))."
+        } else {
+            let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [detector])
+            analyzerDiagnostics = "Best detector-only format: \(analyzerFormat.map(Self.describe) ?? "none"). No compatible SpeechTranscriber locale for \(inputLanguage.label)."
+        }
+    }
+
+    private func supportedSpeechLocale(for language: ConversationLanguage, supportedLocales: [Locale]) async -> Locale? {
+        if let localeIdentifier = language.localeIdentifier {
+            let requestedLocale = Locale(identifier: localeIdentifier)
+            return await SpeechTranscriber.supportedLocale(equivalentTo: requestedLocale)
+                ?? Self.bestLocaleMatch(for: requestedLocale, in: supportedLocales)
+        }
+
+        let currentLocale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
+            ?? Self.bestLocaleMatch(for: Locale.current, in: supportedLocales)
+        if let currentLocale {
+            return currentLocale
+        }
+        let englishLocale = Locale(identifier: "en-US")
+        return await SpeechTranscriber.supportedLocale(equivalentTo: englishLocale)
+            ?? Self.bestLocaleMatch(for: englishLocale, in: supportedLocales)
+    }
+
+    private static func bestLocaleMatch(for requestedLocale: Locale, in supportedLocales: [Locale]) -> Locale? {
+        if let exactMatch = supportedLocales.first(where: { $0.identifier == requestedLocale.identifier }) {
+            return exactMatch
+        }
+
+        guard let requestedLanguage = requestedLocale.language.languageCode?.identifier else {
+            return nil
+        }
+
+        return supportedLocales.first {
+            $0.language.languageCode?.identifier == requestedLanguage
+        }
+    }
+
+    private static func describe(_ locales: [Locale]) -> String {
+        let identifiers = locales.map(\.identifier).sorted()
+        return identifiers.isEmpty ? "none" : identifiers.joined(separator: ", ")
+    }
+
+    @available(iOS 26.0, macOS 26.0, *)
+    private static func describe(_ status: AssetInventory.Status) -> String {
+        switch status {
+        case .unsupported:
+            return "unsupported"
+        case .supported:
+            return "supported"
+        case .downloading:
+            return "downloading"
+        case .installed:
+            return "installed"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private static func describe(_ formats: [AVAudioFormat]) -> String {
+        guard !formats.isEmpty else { return "none" }
+        return formats.map(Self.describe).joined(separator: "; ")
+    }
+    #endif
 
     func stopRecording() async {
         guard isRecording || isPreparing else { return }
@@ -268,6 +395,7 @@ final class SpeechTranscriptionController {
         transcript = finalizedTranscript
         status = finalizedTranscript.isEmpty ? "No transcript captured" : "Transcript ready"
         if !finalizedTranscript.isEmpty {
+            diagnosticsCenter?.log("Final transcript: \(finalizedTranscript)", source: "SpeechAnalyzer")
             onTranscriptFinalized?(finalizedTranscript)
         }
     }
@@ -308,6 +436,7 @@ final class SpeechTranscriptionController {
             didDetectSpeech = true
             status = "Speech detected..."
             diagnostics = "SpeechDetector reports active speech."
+            diagnosticsCenter?.log("SpeechDetector reports active speech.", source: "SpeechDetector")
             endOfSpeechTask?.cancel()
             return
         }
@@ -315,6 +444,7 @@ final class SpeechTranscriptionController {
         guard didDetectSpeech, isRecording else { return }
         status = "Speech pause detected..."
         diagnostics = "SpeechDetector reports a pause; finalizing if speech does not resume."
+        diagnosticsCenter?.log(diagnostics, source: "SpeechDetector")
         scheduleEndOfSpeechTimeout()
     }
 
@@ -502,7 +632,7 @@ enum TalkToMeError: LocalizedError {
     case microphoneDenied
     case speechDenied
     case speechTranscriberUnavailable
-    case speechLocaleUnavailable(String)
+    case speechLocaleUnavailable(String, String)
     case audioInputUnavailable(String)
     case audioUnitDeviceSelectionFailed(OSStatus)
     case audioBufferAllocationFailed
@@ -516,8 +646,8 @@ enum TalkToMeError: LocalizedError {
             return "Speech recognition access was denied."
         case .speechTranscriberUnavailable:
             return "SpeechTranscriber is not available on this device."
-        case .speechLocaleUnavailable(let identifier):
-            return "SpeechTranscriber has no supported locale matching \(identifier) or en-US."
+        case .speechLocaleUnavailable(let identifier, let availableLocales):
+            return "SpeechTranscriber has no supported locale matching \(identifier). Available: \(availableLocales)."
         case .audioInputUnavailable(let name):
             return "Could not use audio input: \(name)."
         case .audioUnitDeviceSelectionFailed(let status):

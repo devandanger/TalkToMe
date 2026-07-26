@@ -1,6 +1,6 @@
 import Foundation
 
-enum ResponseLanguage: String, CaseIterable, Identifiable {
+enum ConversationLanguage: String, CaseIterable, Identifiable {
     case slovenian
     case english
     case system
@@ -18,7 +18,7 @@ enum ResponseLanguage: String, CaseIterable, Identifiable {
         }
     }
 
-    var voiceLanguageCode: String? {
+    var localeIdentifier: String? {
         switch self {
         case .slovenian:
             return "sl-SI"
