@@ -5,7 +5,7 @@ struct TalkToMeView: View {
     @State private var intelligence = AppleIntelligenceController()
     @State private var speaker = SpokenResponseController()
     @State private var conversationHistory: [ConversationMessage] = []
-    @State private var prompt = "You are TalkToMe, a concise conversational assistant. Use the conversation history for continuity, answer the current user message naturally, and ask at most one useful follow-up question when it helps."
+    @State private var prompt = "You are a concise conversational assistant. Use the conversation history for continuity, answer the current user message naturally, and ask at most one useful follow-up question when it helps. Reply with only the assistant message, without a name or role prefix."
     @State private var conversationActive = false
 
     var body: some View {

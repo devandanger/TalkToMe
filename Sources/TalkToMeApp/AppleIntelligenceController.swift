@@ -64,11 +64,20 @@ final class AppleIntelligenceController {
 
     private static func promptText(for transcript: String, history: [ConversationMessage]) -> String {
         let priorConversation = history
-            .map { "\($0.role.rawValue): \($0.text)" }
+            .map { message in
+                switch message.role {
+                case .user:
+                    return "User said:\n\(message.text)"
+                case .assistant:
+                    return "Assistant replied:\n\(message.text)"
+                }
+            }
             .joined(separator: "\n")
 
         if priorConversation.isEmpty {
             return """
+            Reply directly to the current user message. Do not prefix your response with a speaker name.
+
             Current user message:
             \(transcript)
             """
@@ -77,6 +86,8 @@ final class AppleIntelligenceController {
         return """
         Conversation so far:
         \(priorConversation)
+
+        Reply directly to the current user message. Do not prefix your response with a speaker name.
 
         Current user message:
         \(transcript)
