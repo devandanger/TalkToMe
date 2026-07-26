@@ -5,7 +5,8 @@ struct TalkToMeView: View {
     @State private var intelligence = AppleIntelligenceController()
     @State private var speaker = SpokenResponseController()
     @State private var conversationHistory: [ConversationMessage] = []
-    @State private var prompt = "You are a concise conversational assistant. Use the conversation history for continuity, answer the current user message naturally, and ask at most one useful follow-up question when it helps. Reply with only the assistant message, without a name or role prefix."
+    @State private var prompt = "You are a concise conversational assistant. Use the conversation history for continuity, answer the current user message naturally but with simple sentences, and ask at most one useful follow-up question when it helps. Reply with only the assistant message, without a name or role prefix."
+    @State private var responseLanguage: ResponseLanguage = .slovenian
     @State private var conversationActive = false
 
     var body: some View {
@@ -43,6 +44,9 @@ struct TalkToMeView: View {
                 speaker.onFinishedSpeaking = {
                     guard conversationActive else { return }
                     Task { await speech.startRecording() }
+                }
+                if let voiceLanguageCode = responseLanguage.voiceLanguageCode {
+                    speaker.preferLanguage(voiceLanguageCode)
                 }
                 await speech.prepare()
             }
@@ -97,6 +101,41 @@ struct TalkToMeView: View {
 
             TextField("Prompt", text: $prompt, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
+
+            speechOutputControls
+        }
+    }
+
+    private var speechOutputControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Picker("Response", selection: $responseLanguage) {
+                    ForEach(ResponseLanguage.allCases) { language in
+                        Text(language.label).tag(language)
+                    }
+                }
+                .onChange(of: responseLanguage) { _, newValue in
+                    if let voiceLanguageCode = newValue.voiceLanguageCode {
+                        speaker.preferLanguage(voiceLanguageCode)
+                    }
+                }
+
+                Picker("Voice", selection: $speaker.selectedVoiceIdentifier) {
+                    if speaker.availableVoices.isEmpty {
+                        Text("System Voice").tag(String?.none)
+                    } else {
+                        ForEach(speaker.availableVoices) { voice in
+                            Text(voice.displayName).tag(Optional(voice.id))
+                        }
+                    }
+                }
+
+                Button {
+                    speaker.refreshVoices()
+                } label: {
+                    Label("Refresh Voices", systemImage: "arrow.clockwise")
+                }
+            }
         }
     }
 
@@ -129,7 +168,7 @@ struct TalkToMeView: View {
                                 Text(message.role.rawValue)
                                     .font(.caption)
                                     .fontWeight(.semibold)
-                                    .foregroundStyle(message.role == .user ? .blue : .green)
+                                    .foregroundStyle(color(for: message.role))
                                 Text(message.text)
                                     .font(.caption)
                                     .textSelection(.enabled)
@@ -236,7 +275,15 @@ struct TalkToMeView: View {
 
         let historyForPrompt = conversationHistory
         conversationHistory.append(.init(role: .user, text: trimmedTranscript))
-        await intelligence.respond(to: trimmedTranscript, history: historyForPrompt, instructions: prompt)
+        await intelligence.respond(
+            to: trimmedTranscript,
+            history: historyForPrompt,
+            instructions: prompt,
+            responseLanguage: responseLanguage
+        )
+        if !intelligence.lastPrompt.isEmpty {
+            conversationHistory.append(.init(role: .foundationRequest, text: intelligence.lastPrompt))
+        }
         if continueListening, !conversationActive {
             return
         }
@@ -254,5 +301,16 @@ struct TalkToMeView: View {
             return "Listening. Your words will appear here after you finish speaking."
         }
         return "Tap Record and say what happened today."
+    }
+
+    private func color(for role: ConversationMessage.Role) -> Color {
+        switch role {
+        case .user:
+            return .blue
+        case .assistant:
+            return .green
+        case .foundationRequest:
+            return .orange
+        }
     }
 }

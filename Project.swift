@@ -19,10 +19,7 @@ let project = Project(
                 "UILaunchScreen": [:],
             ]),
             sources: ["Sources/TalkToMeApp/**"],
-            entitlements: .dictionary([
-                "com.apple.security.app-sandbox": true,
-                "com.apple.security.device.audio-input": true,
-            ]),
+            entitlements: .file(path: "Support/TalkToMe.entitlements"),
             settings: .settings(
                 base: [
                     "ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS": "YES",

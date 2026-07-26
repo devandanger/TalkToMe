@@ -11,6 +11,7 @@ final class AppleIntelligenceController {
     var response = ""
     var diagnostics = "Checking availability..."
     var isGenerating = false
+    private(set) var lastPrompt = ""
 
     func refreshDiagnostics() {
         #if canImport(FoundationModels)
@@ -25,9 +26,11 @@ final class AppleIntelligenceController {
         #endif
     }
 
-    func respond(to transcript: String, history: [ConversationMessage], instructions: String) async {
+    func respond(to transcript: String, history: [ConversationMessage], instructions: String, responseLanguage: ResponseLanguage) async {
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTranscript.isEmpty else { return }
+        let promptText = Self.promptText(for: trimmedTranscript, history: history, responseLanguage: responseLanguage)
+        lastPrompt = promptText
 
         isGenerating = true
         response = ""
@@ -49,7 +52,7 @@ final class AppleIntelligenceController {
                     model: model,
                     instructions: Instructions(instructions)
                 )
-                let result = try await session.respond(to: Prompt(Self.promptText(for: trimmedTranscript, history: history)))
+                let result = try await session.respond(to: Prompt(promptText))
                 response = result.content
             } catch {
                 response = "Foundation Models request failed: \(error.localizedDescription)"
@@ -62,7 +65,7 @@ final class AppleIntelligenceController {
         #endif
     }
 
-    private static func promptText(for transcript: String, history: [ConversationMessage]) -> String {
+    private static func promptText(for transcript: String, history: [ConversationMessage], responseLanguage: ResponseLanguage) -> String {
         let priorConversation = history
             .map { message in
                 switch message.role {
@@ -70,12 +73,17 @@ final class AppleIntelligenceController {
                     return "User said:\n\(message.text)"
                 case .assistant:
                     return "Assistant replied:\n\(message.text)"
+                case .foundationRequest:
+                    return ""
                 }
             }
+            .filter { !$0.isEmpty }
             .joined(separator: "\n")
 
         if priorConversation.isEmpty {
             return """
+            \(responseLanguage.promptInstruction)
+
             Reply directly to the current user message. Do not prefix your response with a speaker name.
 
             Current user message:
@@ -86,6 +94,8 @@ final class AppleIntelligenceController {
         return """
         Conversation so far:
         \(priorConversation)
+
+        \(responseLanguage.promptInstruction)
 
         Reply directly to the current user message. Do not prefix your response with a speaker name.
 
@@ -99,7 +109,7 @@ final class AppleIntelligenceController {
     private static func describe(_ availability: SystemLanguageModel.Availability, languages: Set<Locale.Language>) -> String {
         switch availability {
         case .available:
-            let languageList = languages.map(\.minimalIdentifier).sorted().prefix(6).joined(separator: ", ")
+            let languageList = languages.map(\.minimalIdentifier).sorted().joined(separator: ", ")
             return "Available. Languages: \(languageList)"
         case .unavailable(.deviceNotEligible):
             return "Unavailable: this device is not Apple Intelligence eligible."

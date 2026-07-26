@@ -25,10 +25,20 @@ final class SpeechTranscriptionController {
     var isRecording = false
     var isPreparing = false
     var audioInputDevices: [AudioInputDevice] = []
-    var selectedAudioInputID: String?
+    var selectedAudioInputID: String? {
+        didSet {
+            guard selectedAudioInputID != oldValue else { return }
+            persistSelectedAudioInputID(selectedAudioInputID)
+        }
+    }
     @ObservationIgnored var onTranscriptFinalized: ((String) -> Void)?
 
+    private let selectedAudioInputDefaultsKey = "selectedAudioInputID"
     private let audioEngine = AVAudioEngine()
+
+    init() {
+        selectedAudioInputID = UserDefaults.standard.string(forKey: selectedAudioInputDefaultsKey)
+    }
 
     #if canImport(Speech)
     @available(iOS 26.0, macOS 26.0, *)
@@ -99,6 +109,14 @@ final class SpeechTranscriptionController {
         audioInputDevices = []
         selectedAudioInputID = nil
         #endif
+    }
+
+    private func persistSelectedAudioInputID(_ inputID: String?) {
+        if let inputID {
+            UserDefaults.standard.set(inputID, forKey: selectedAudioInputDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: selectedAudioInputDefaultsKey)
+        }
     }
 
     func startRecording() async {
