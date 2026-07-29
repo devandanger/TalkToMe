@@ -40,7 +40,8 @@ struct TalkToMeView: View {
             .task {
                 speech.diagnosticsCenter = appDiagnostics
                 intelligence.diagnosticsCenter = appDiagnostics
-                speaker.diagnosticsCenter = appDiagnostics
+                speaker.attachDiagnosticsCenter(appDiagnostics)
+                speaker.refreshPiperModels()
                 intelligence.refreshDiagnostics()
                 speech.onTranscriptFinalized = { transcript in
                     Task { await respondAndSpeak(to: transcript, continueListening: true) }
@@ -136,6 +137,12 @@ struct TalkToMeView: View {
     private var speechOutputControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
+                Picker("Engine", selection: $speaker.outputEngine) {
+                    ForEach(SpeechOutputEngine.allCases) { engine in
+                        Text(engine.label).tag(engine)
+                    }
+                }
+
                 Picker("Voice", selection: $speaker.selectedVoiceIdentifier) {
                     if speaker.availableVoices.isEmpty {
                         Text("System Voice").tag(String?.none)
@@ -145,11 +152,27 @@ struct TalkToMeView: View {
                         }
                     }
                 }
+                .disabled(speaker.outputEngine == .piperLocal)
+
+                Picker("Piper Model", selection: $speaker.selectedPiperModelID) {
+                    if speaker.availablePiperModels.isEmpty {
+                        Text("No Piper Models").tag(String?.none)
+                    } else {
+                        ForEach(speaker.availablePiperModels) { model in
+                            Text(model.displayName).tag(Optional(model.id))
+                        }
+                    }
+                }
+                .disabled(speaker.outputEngine != .piperLocal)
 
                 Button {
-                    speaker.refreshVoices()
+                    if speaker.outputEngine == .piperLocal {
+                        speaker.refreshPiperModels()
+                    } else {
+                        speaker.refreshVoices()
+                    }
                 } label: {
-                    Label("Refresh Voices", systemImage: "arrow.clockwise")
+                    Label("Refresh Speech Output", systemImage: "arrow.clockwise")
                 }
             }
         }

@@ -19,6 +19,9 @@ let project = Project(
                 "UILaunchScreen": [:],
             ]),
             sources: ["Sources/TalkToMeApp/**"],
+            resources: [
+                .folderReference(path: "Resources/Piper", inclusionCondition: .when([.macos])),
+            ],
             entitlements: .file(path: "Support/TalkToMe.entitlements"),
             settings: .settings(
                 base: [
