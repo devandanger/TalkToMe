@@ -1,0 +1,6 @@
+Resources/Piper/bin/piper filter=lfs diff=lfs merge=lfs -text
+Resources/Piper/bin/piper_phonemize filter=lfs diff=lfs merge=lfs -text
+Resources/Piper/bin/espeak-ng filter=lfs diff=lfs merge=lfs -text
+Resources/Piper/**/*.onnx filter=lfs diff=lfs merge=lfs -text
+Resources/Piper/**/*.ort filter=lfs diff=lfs merge=lfs -text
+Resources/Piper/**/*.dylib filter=lfs diff=lfs merge=lfs -text
